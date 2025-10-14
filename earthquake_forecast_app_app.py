@@ -1,195 +1,546 @@
-"""
-Earthquake Forecast Demo (Streamlit + Folium)
-
-Files in this single-file demo:
-- app.py (this file): Streamlit app using folium to visualize earthquake points in Indonesia
-- requirements.txt (see README below)
-
-README / Deployment:
-1. Create a new GitHub repository (e.g. earthquake-forecast-app) and add this app.py file.
-2. Add a requirements.txt containing: streamlit
-   folium
-   streamlit-folium
-   pandas
-   numpy
-3. Commit and push to GitHub.
-4. Deploy on Streamlit Community Cloud:
-   - Go to https://streamlit.io/cloud and sign in with your GitHub account.
-   - Create a new app and point it to the repository and branch containing this app.py.
-   - Streamlit will install packages from requirements.txt and run `streamlit run app.py`.
-
-IMPORTANT DISCLAIMER:
-This application is a demonstration/prototype only. The "forecast" implemented here is a simple heuristic scoring function for visualization and educational purposes — it is NOT a validated earthquake prediction model and MUST NOT be used for real-world decision-making, warnings, or safety-critical operations.
-
-Usage (app features):
-- Input one earthquake candidate (magnitude, latitude, longitude, depth) and see a forecast score (0-100%)
-- Optionally upload a CSV of multiple points (columns: lat, lon, depth, mag) to visualize many points
-- Map centers over Indonesia by default
-
-"""
-
+%%writefile app.py
 import streamlit as st
-from streamlit_folium import st_folium
-import folium
-import pandas as pd
 import numpy as np
-import math
-import random
+import pandas as pd
+import torch
+import torch.nn as nn
+import learn2learn as l2l
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import matplotlib.pyplot as plt
+import folium
+from geopy.geocoders import Nominatim
+import time
+import torch.optim as optim
+from streamlit_folium import st_folium
 
-st.set_page_config(page_title="Earthquake Forecast Demo", layout="wide")
+st.title("Aplikasi Prediksi Gempa Bumi Meta-Learning")
+st.write("Aplikasi ini menggunakan model Meta-Learning (MAML) untuk memprediksi karakteristik gempa bumi di masa depan.")
 
-# --- Helper functions ---
+torch.set_float32_matmul_precision('high')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+SEED = 42
+np.random.seed(SEED); torch.manual_seed(SEED)
 
-def sigmoid(x):
-    return 1 / (1 + math.exp(-x))
+WIN = 10
+N_TASKS = 6
+# CSV_PATH = "/content/gabungan_2010-2025_utc.csv" # Placeholder path - user needs to ensure this file is accessible
 
-
-def simple_forecast_score(mag, depth, lat=None, lon=None):
-    """
-    Very simple heuristic scoring function (DEMONSTRATION ONLY):
-    - Higher magnitude increases score
-    - Shallower depth increases score
-    - Small random noise to break ties
-    Returns percentage 0-100
-    """
-    # Normalize magnitude around 4.5
-    mag_term = (mag - 4.5) * 1.3
-    # Depth penalty (shallower -> higher score). Depth in km. typical shallow quakes <70
-    depth_term = - (depth / 100.0)
-    # optional latitude/longitude factor to slightly increase scores inside Indonesia bounds
-    indo_bonus = 0.0
-    if lat is not None and lon is not None:
-        # rough bounding box for Indonesia
-        if -15 <= lat <= 6 and 95 <= lon <= 141:
-            indo_bonus = 0.3
-    noise = random.uniform(-0.2, 0.2)
-    raw = mag_term + depth_term + indo_bonus + noise
-    prob = sigmoid(raw)
-    percent = max(0.0, min(100.0, prob * 100))
-    return round(percent, 1)
-
-
-# --- UI ---
-
-st.title("Earthquake Forecast — Demo (Indonesia)")
-st.markdown("""
-Masukkan parameter gempa (magnitudo, koordinat lat/lon, kedalaman) atau unggah CSV berisi beberapa titik.
-
-**Catatan:** ini hanya demo visualisasi dan *bukan* model prediksi gempa yang valid.
-""")
-
-with st.sidebar:
-    st.header("Input")
-    mode = st.radio("Mode input:", ["Single point", "Upload CSV"], index=0)
-    if mode == "Single point":
-        mag = st.number_input("Magnitude (Mw)", min_value=0.0, max_value=10.0, value=5.0, step=0.1)
-        lat = st.number_input("Latitude", value=-2.5, format="%f")
-        lon = st.number_input("Longitude", value=118.0, format="%f")
-        depth = st.number_input("Depth (km)", min_value=0.0, max_value=700.0, value=30.0)
-        show_score = st.checkbox("Tampilkan skor forecast", value=True)
-        submit = st.button("Tampilkan pada peta")
-    else:
-        uploaded = st.file_uploader("Unggah CSV (lat,lon,depth,mag)", type=["csv"])
-        csv_example = "lat,lon,depth,mag\n-6.2,106.8,10,4.7\n-2.5,118.0,30,5.1\n-7.5,110.4,45,6.0"
-        st.caption("Contoh isi CSV:\n" + csv_example)
-        submit = st.button("Unggah dan tampilkan CSV")
-
-# Default center => Indonesia (approx)
-center_lat, center_lon = -2.5, 118.0
-
-# Initialize folium map
-m = folium.Map(location=[center_lat, center_lon], zoom_start=5, tiles="OpenStreetMap")
-
-# Add a simple basemap layer control
-folium.TileLayer('Stamen Terrain').add_to(m)
-folium.LayerControl().add_to(m)
-
-# If single point and submitted
-if mode == "Single point" and submit:
-    score = simple_forecast_score(mag, depth, lat, lon)
-    popup_text = f"Mag: {mag}, Depth: {depth} km\nForecast score: {score}% (demo)"
-    # Color by score: green low, orange mid, red high
-    if score >= 66:
-        color = 'red'
-    elif score >= 33:
-        color = 'orange'
-    else:
-        color = 'green'
-    folium.CircleMarker(location=[lat, lon], radius=10, color=color, fill=True, fill_opacity=0.7,
-                        popup=popup_text).add_to(m)
-    st.subheader("Hasil Forecast (Demo)")
-    st.markdown(f"**Skor:** {score}% — interpretasi: hanya ilustrasi")
-
-# If CSV upload
-if mode == "Upload CSV" and submit:
-    if uploaded is None:
-        st.warning("Silakan unggah file CSV terlebih dahulu.")
-    else:
+# =========================
+# Data Loading and Preprocessing Function (Steps 2-5)
+# Modified to accept uploaded file object
+# =========================
+@st.cache_resource(show_spinner="Loading and preprocessing data...")
+def load_and_preprocess_data(uploaded_file, use_cols, win=10, n_tasks=6):
+    if uploaded_file is not None:
         try:
-            df = pd.read_csv(uploaded)
-            # Expect columns: lat, lon, depth, mag (tolerant)
-            colnames = [c.lower().strip() for c in df.columns]
-            # find columns
-            def find_col(options):
-                for o in options:
-                    if o in colnames:
-                        return df.columns[colnames.index(o)]
-                return None
-            lat_col = find_col(['lat','latitude'])
-            lon_col = find_col(['lon','longitude','lng'])
-            depth_col = find_col(['depth'])
-            mag_col = find_col(['mag','magnitude','mw'])
-            if not lat_col or not lon_col or not depth_col or not mag_col:
-                st.error('CSV harus berisi kolom: lat, lon, depth, mag (nama kolom case-insensitive)')
-            else:
-                points = []
-                for _, row in df.iterrows():
-                    rlat = float(row[lat_col])
-                    rlon = float(row[lon_col])
-                    rdepth = float(row[depth_col])
-                    rmag = float(row[mag_col])
-                    score = simple_forecast_score(rmag, rdepth, rlat, rlon)
-                    points.append((rlat, rlon, rdepth, rmag, score))
-                    popup = f"Mag: {rmag}, Depth: {rdepth} km\nScore: {score}%"
-                    if score >= 66:
-                        color = 'red'
-                    elif score >= 33:
-                        color = 'orange'
-                    else:
-                        color = 'green'
-                    folium.CircleMarker(location=[rlat, rlon], radius=6, color=color, fill=True,
-                                        fill_opacity=0.7, popup=popup).add_to(m)
-                st.success(f"Ditampilkan {len(points)} titik dari CSV (demo)")
+            # Read the uploaded file into a pandas DataFrame
+            df = pd.read_csv(uploaded_file)
+            df = df.dropna(subset=use_cols).reset_index(drop=True)
+            raw = df[use_cols].astype(np.float32).values
+            scaler = MinMaxScaler()
+            data = scaler.fit_transform(raw).astype(np.float32)
+
+            def make_sequences(arr, win):
+                X, y = [], []
+                for i in range(len(arr)-win):
+                    X.append(arr[i:i+win])
+                    y.append(arr[i+win])
+                return np.asarray(X, np.float32), np.asarray(y, np.float32)
+
+            X_seq, y = make_sequences(data, win)
+
+            def seq_to_meta(X_seq):
+                mean_ = X_seq.mean(axis=1)
+                std_  = X_seq.std(axis=1)
+                last_ = X_seq[:, -1, :]
+                return np.concatenate([mean_, std_, last_], axis=1).astype(np.float32)
+
+            X_meta = seq_to_meta(X_seq)
+
+            def split_tasks(X_seq, X_meta, y, n_tasks):
+                N = len(X_seq)
+                size = N // n_tasks
+                tasks = []
+                for t in range(n_tasks):
+                    s, e = t*size, (t+1)*size if t < n_tasks-1 else N
+                    tasks.append((
+                        X_seq[s:e],
+                        X_meta[s:e],
+                        y[s:e],
+                    ))
+                return tasks
+
+            tasks = split_tasks(X_seq, X_meta, y, n_tasks=n_tasks)
+
+            return data, scaler, tasks, X_seq.shape[2], X_meta.shape[1], y.shape[1]
+
         except Exception as e:
-            st.error(f"Gagal membaca CSV: {e}")
+            st.error(f"An error occurred during data loading and preprocessing: {e}")
+            return None, None, None, None, None, None
+    else:
+        return None, None, None, None, None, None
 
-# Always show map in main area
-st.subheader("Peta — Visualisasi Titik Gempa (Indonesia)")
-with st.expander("Opsi peta"):
-    st.write("Gunakan zoom dan pan pada peta. Klik marker untuk melihat detail (demo).")
 
-# Render folium map in Streamlit
-st_data = st_folium(m, width=900, height=600)
+# =========================
+# Step 7: Loss, Optimizer, dan MAML
+# =========================
 
-# Footer / tips
-st.markdown("---")
-st.caption("Aplikasi deteksi gempa")
+# -------------------------------
+# 1. Model LSTM + Transformer + Meta Features (PyTorch)
+# -------------------------------
+class LSTMTransformerNet(nn.Module):
+    def __init__(self, input_dim=4, hidden_dim=64, meta_dim=12, output_dim=4, win=10):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True)
+        self.lstm_fc = nn.Linear(hidden_dim, 32)
+        self.transformer_encoder_layer = nn.TransformerEncoderLayer(d_model=input_dim, nhead=4, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(self.transformer_encoder_layer, num_layers=1)
+        self.trans_fc = nn.Linear(input_dim, 32)
+        self.meta_fc = nn.Linear(meta_dim, 32)
+        self.fusion_fc1 = nn.Linear(32+32+32, 64)
+        self.dropout = nn.Dropout(0.3)
+        self.out = nn.Linear(64, output_dim)
 
-# If user wants to test multiple random demo points
-if st.button('Generate contoh acak 20 titik di Indonesia'):
-    for i in range(20):
-        rlat = random.uniform(-10.0, 5.0)
-        rlon = random.uniform(95.0, 141.0)
-        rdepth = random.uniform(5, 300)
-        rmag = random.uniform(4.0, 7.5)
-        score = simple_forecast_score(rmag, rdepth, rlat, rlon)
-        popup = f"Mag: {round(rmag,2)}, Depth: {int(rdepth)} km\nScore: {score}%"
-        if score >= 66:
-            color = 'red'
-        elif score >= 33:
-            color = 'orange'
+    def forward(self, x_seq, x_meta):
+        lstm_out, _ = self.lstm(x_seq)
+        lstm_out = self.lstm_fc(lstm_out[:, -1, :])
+        trans_out = self.transformer_encoder(x_seq)
+        trans_out = self.trans_fc(trans_out.mean(dim=1))
+        meta_out = self.meta_fc(x_meta)
+        fusion = torch.cat([lstm_out, trans_out, meta_out], dim=1)
+        fusion = self.fusion_fc1(fusion)
+        fusion = self.dropout(fusion)
+        return self.out(fusion)
+
+# -------------------------------
+# 2. Hybrid Loss
+# -------------------------------
+def hybrid_loss(pred, target):
+    mse = nn.MSELoss()(pred, target)
+    mae = nn.L1Loss()(pred, target)
+    return mse + 0.5 * mae
+
+# -------------------------------
+# 4. Convert numpy tasks → tensor tasks
+# -------------------------------
+def to_tensor(x):
+    return torch.tensor(x, dtype=torch.float32, device=device)
+
+# -------------------------------
+# 5. Time-based split (support=masa lalu, query=masa depan)
+# -------------------------------
+def time_based_split(Xs, Xm, Ys, ratio=0.7):
+    k = int(len(Xs) * ratio)
+    return (
+        Xs[:k], Xm[:k], Ys[:k],
+        Xs[k:], Xm[k:], Ys[k:]
+    )
+
+# -------------------------------
+# 8. MAML Training Loop Function
+# -------------------------------
+@st.cache_resource(show_spinner="Training MAML model...")
+def train_maml_model(model_params, train_params, tensor_tasks):
+    input_dim, hidden_dim, meta_dim, output_dim, win = model_params
+    maml_lr, optimizer_lr, weight_decay, inner_steps, clip_norm, epochs = train_params
+
+    model = LSTMTransformerNet(input_dim, hidden_dim, meta_dim, output_dim, win).to(device)
+    maml_model = l2l.algorithms.MAML(model, lr=maml_lr, first_order=True)
+    optimizer = optim.Adam(maml_model.parameters(), lr=optimizer_lr, weight_decay=weight_decay)
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for epoch in range(epochs):
+        meta_loss = 0.0
+        task_count = 0
+
+        for Xs, Xm, Ys in tensor_tasks:
+            learner = maml_model.clone()
+            Xs_sup, Xm_sup, Ys_sup, Xs_qry, Xm_qry, Ys_qry = time_based_split(Xs, Xm, Ys, ratio=0.7)
+
+            for step in range(inner_steps):
+                pred = learner(Xs_sup, Xm_sup)
+                loss = hybrid_loss(pred, Ys_sup)
+                learner.adapt(loss)
+
+            pred_q = learner(Xs_qry, Xm_qry)
+            loss_q = hybrid_loss(pred_q, Ys_qry)
+            meta_loss += loss_q
+            task_count += 1
+
+        optimizer.zero_grad()
+        meta_loss.backward()
+        torch.nn.utils.clip_grad_norm_(maml_model.parameters(), clip_norm)
+        optimizer.step()
+
+        avg_meta_loss = meta_loss.item() / task_count if task_count > 0 else 0
+        status_text.text(f"Epoch {epoch+1}/{epochs}, Average Meta-Loss: {avg_meta_loss:.4f}")
+        progress_bar.progress((epoch + 1) / epochs)
+
+    st.success("MAML training complete.")
+    return maml_model
+
+# =========================
+# 9. Evaluation Function
+# =========================
+def evaluate_on_task(maml_model, Xs, Xm, Ys, scaler, adapt_ratio=0.8, inner_steps=5):
+    Xs_t = torch.tensor(Xs, dtype=torch.float32, device=device)
+    Xm_t = torch.tensor(Xm, dtype=torch.float32, device=device)
+    Ys_t = torch.tensor(Ys, dtype=torch.float32, device=device)
+
+    n = len(Xs_t)
+    cut = int(adapt_ratio * n)
+
+    learner = maml_model.clone()
+    for _ in range(inner_steps):
+        pred = learner(Xs_t[:cut], Xm_t[:cut])
+        loss = hybrid_loss(pred, Ys_t[:cut])
+        learner.adapt(loss)
+
+    with torch.no_grad():
+        pred = learner(Xs_t[cut:], Xm_t[cut:]).cpu().numpy()
+        true = Ys_t[cut:].cpu().numpy()
+
+    inv_pred = scaler.inverse_transform(pred)
+    inv_true = scaler.inverse_transform(true)
+
+    mae = mean_absolute_error(inv_true, inv_pred)
+    rmse = np.sqrt(mean_squared_error(inv_true, inv_pred))
+    return mae, rmse, inv_true, inv_pred
+
+# =========================
+# 4. Meta-Features Function (already defined in load_and_preprocess_data, but needed for roll_forecast and predict_magnitude)
+# =========================
+def seq_to_meta(X_seq):
+    mean_ = X_seq.mean(axis=1)
+    std_  = X_seq.std(axis=1)
+    last_ = X_seq[:, -1, :]
+    return np.concatenate([mean_, std_, last_], axis=1).astype(np.float32)
+
+# =========================
+# 9. Rolling Multi-Step Forecast Function
+# =========================
+def roll_forecast(maml_model, X_seq_last, scaler, steps=100, win=WIN):
+    seq = X_seq_last.copy().astype(np.float32)
+    preds_norm = []
+    learner = maml_model.clone()
+
+    for t in range(steps):
+        meta = seq_to_meta(seq[None, ...])
+        x_seq_t = torch.tensor(seq[None, ...], dtype=torch.float32, device=device)
+        x_meta_t = torch.tensor(meta, dtype=torch.float32, device=device)
+
+        with torch.no_grad():
+            yhat = learner(x_seq_t, x_meta_t).cpu().numpy()[0]
+        preds_norm.append(yhat)
+        seq = np.vstack([seq[1:], yhat])
+
+    preds_norm = np.array(preds_norm, np.float32)
+    preds_orig = scaler.inverse_transform(preds_norm)
+    return preds_orig
+
+# =========================
+# 10. Geocoding Function
+# =========================
+geolocator = Nominatim(user_agent="eq_predictor_app")
+
+@st.cache_data(show_spinner="Getting location name...")
+def get_location_name(lat, lon):
+    try:
+        loc = geolocator.reverse((lat, lon), language="id", timeout=10)
+        if loc and "address" in loc.raw:
+            addr = loc.raw["address"]
+            return (addr.get("village") or
+                    addr.get("county") or
+                    addr.get("state") or
+                    addr.get("country") or
+                    "Lokasi tidak dikenal")
         else:
-            color = 'green'
-        folium.CircleMarker(location=[rlat, rlon], radius=6, color=color, fill=True,
-                            fill_opacity=0.7, popup=popup).add_to(m)
-    st.experimental_rerun()
+            return "Lokasi tidak ditemukan"
+    except Exception as e:
+        return f"Error Geocoding: {e}"
+
+# =========================
+# 11. Predict Future Earthquakes Function
+# =========================
+def predict_future_eq(maml_model, last_window, scaler, n_steps=10, win=WIN):
+    future_pred = roll_forecast(maml_model, last_window, scaler, steps=n_steps, win=win)
+    df_future = pd.DataFrame(future_pred, columns=["Magnitude", "Latitude", "Longitude", "Depth (km)"])
+
+    st.info("Mencari nama lokasi untuk prediksi...")
+    location_progress = st.progress(0)
+    lokasi_list = []
+    for i, (_, row) in enumerate(df_future.iterrows()):
+        lokasi_list.append(get_location_name(row["Latitude"], row["Longitude"]))
+        location_progress.progress((i + 1) / len(df_future))
+
+    df_future["Lokasi"] = lokasi_list
+    st.success("Nama lokasi ditemukan.")
+    return df_future
+
+# =========================
+# 12. Plot on Map Function
+# =========================
+def plot_on_map(df_future, map_center=[-2.5, 118], zoom_start=5):
+    fmap = folium.Map(location=map_center, zoom_start=zoom_start)
+
+    for _, row in df_future.iterrows():
+        lat, lon, mag, depth = (float(row["Latitude"]),
+                                float(row["Longitude"]),
+                                float(row["Magnitude"]),
+                                float(row["Depth (km)"]))
+        lokasi = row["Lokasi"]
+
+        popup_info = (f"<b>Magnitude:</b> {mag:.2f}<br>"
+                      f"<b>Latitude:</b> {lat:.2f}<br>"
+                      f"<b>Longitude:</b> {lon:.2f}<br>"
+                      f"<b>Depth:</b> {depth:.1f} km<br>"
+                      f"<b>Lokasi:</b> {lokasi}")
+
+        if depth < 50:
+            color = "red"
+        elif depth < 100:
+            color = "orange"
+        else:
+            color = "blue"
+
+        radius = max(1, mag * 1.5)
+
+        folium.CircleMarker(
+            location=[lat, lon],
+            radius=radius,
+            color=color,
+            fill=True,
+            fill_opacity=0.7,
+            popup=folium.Popup(popup_info, max_width=250)
+        ).add_to(fmap)
+
+    legend_html = """
+     <div style="
+     position: fixed;
+     bottom: 50px; left: 50px; width: 200px; height: 140px;
+     border:2px solid grey; z-index:9999; font-size:14px;
+     background-color:white; padding: 10px;">
+     <b>Legenda Kedalaman</b><br>
+     <i style="background:red; width:10px; height:10px;
+        border-radius:50%; display:inline-block;"></i> Dangkal (&lt;50 km)<br>
+     <i style="background:orange; width:10px; height:10px;
+        border-radius:50%; display:inline-block;"></i> Menengah (50–100 km)<br>
+     <i style="background:blue; width:10px; height:10px;
+        border-radius:50%; display:inline-block;"></i> Dalam (&gt;100 km)
+     </div>
+     """
+    return fmap, legend_html
+
+# =========================
+# 13. Single Point Prediction Function
+# =========================
+def predict_magnitude(maml_model, data, scaler, lat, lon, depth, win=WIN):
+    row = np.array([[0.0, lat, lon, depth]], dtype=np.float32)
+    row_norm = scaler.transform(row)
+
+    if len(data) < win:
+         st.error(f"Data is too short ({len(data)} samples) to form a window of size {win}.")
+         return None
+    seq = np.vstack([data[-(win-1):], row_norm])
+    meta = seq_to_meta(seq[None, ...])
+
+    x_seq_t = torch.tensor(seq[None, ...], dtype=torch.float32, device=device)
+    x_meta_t = torch.tensor(meta, dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        pred = maml_model(x_seq_t, x_meta_t).cpu().numpy()[0]
+
+    pred_orig = scaler.inverse_transform(pred.reshape(1, -1))[0]
+    return pred_orig[0]
+
+# =========================
+# Streamlit App Interface
+# =========================
+
+st.sidebar.header("Unggah File Data Gempa")
+uploaded_file = st.sidebar.file_uploader("Unggah file CSV Anda", type=["csv"])
+
+use_cols = ["Magnitude", "Latitude", "Longitude", "Depth (km)"]
+data, scaler, tasks, F_SEQ, F_META, F_OUT = load_and_preprocess_data(uploaded_file, use_cols, WIN, N_TASKS)
+
+
+if data is not None and scaler is not None and tasks is not None:
+    # Model and Training Parameters
+    model_params = (F_SEQ, 64, F_META, F_OUT, WIN)
+    train_params = (0.01, 1e-3, 1e-5, 5, 1.0, 10) # maml_lr, optimizer_lr, weight_decay, inner_steps, clip_norm, epochs
+
+    # Train MAML model if not already trained
+    # Convert tasks to tensor_tasks only once for training
+    @st.cache_resource(show_spinner="Converting data to tensors...")
+    def convert_tasks_to_tensors(tasks):
+        tensor_tasks = []
+        for Xs, Xm, Ys in tasks:
+            tensor_tasks.append((
+                to_tensor(Xs),
+                to_tensor(Xm),
+                to_tensor(Ys),
+            ))
+        return tensor_tasks
+
+    tensor_tasks = convert_tasks_to_tensors(tasks)
+
+    maml = train_maml_model(model_params, train_params, tensor_tasks)
+
+    if maml is not None: # Check if training was successful
+        # =========================
+        # Display Evaluation Results (Step 9)
+        # =========================
+        st.subheader("Evaluasi Per Task (pada skala asli)")
+        st.write("Metrik MAE dan RMSE untuk setiap task pada data holdout:")
+        evaluation_results = []
+        for i, (Xs, Xm, Ys) in enumerate(tasks, 1):
+            # Check if Xs, Xm, Ys are not None and have enough samples
+            if Xs is not None and Xm is not None and Ys is not None and len(Xs) > WIN:
+                 mae, rmse, tru, prd = evaluate_on_task(maml, Xs, Xm, Ys, scaler)
+                 evaluation_results.append({"Task": i, "MAE": mae, "RMSE": rmse})
+            else:
+                 evaluation_results.append({"Task": i, "MAE": "N/A", "RMSE": "N/A"})
+
+
+        eval_df = pd.DataFrame(evaluation_results)
+        st.dataframe(eval_df)
+
+        # =========================
+        # Visualize Holdout (Step 9)
+        # =========================
+        st.subheader("Visualisasi Holdout (Actual vs Predicted)")
+        st.write("Perbandingan nilai aktual dan prediksi untuk 300 sampel pertama dari Task 1:")
+        # Check if tasks[0] is valid before evaluating
+        if tasks and len(tasks[0][0]) > WIN:
+            mae, rmse, tru, prd = evaluate_on_task(maml, *tasks[0], scaler, adapt_ratio=0.8)
+
+            labels = ["Magnitude", "Latitude", "Longitude", "Depth (km)"]
+
+            fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+            axes = axes.flatten()
+            idx = slice(0, min(300, len(tru)))
+
+            for i in range(4):
+                axes[i].plot(tru[idx, i], marker='o', markersize=3, label='Aktual', alpha=0.8)
+                plt.plot(prd[idx, i], marker='x', markersize=3, label='Prediksi', alpha=0.8)
+                axes[i].set_title(f"{labels[i]}")
+                axes[i].set_xlabel("Sample Index")
+                axes[i].set_ylabel(labels[i])
+                axes[i].grid(True, linestyle="--", alpha=0.6)
+                axes[i].legend()
+
+            plt.suptitle(f"Task 1 Holdout (first {idx.stop} samples) — MAE={mae:.4f}, RMSE={rmse:.4f}", fontsize=16)
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            st.pyplot(fig)
+            plt.close(fig) # Close the figure to prevent memory issues
+        else:
+            st.warning("Tidak cukup data di Task 1 untuk visualisasi holdout.")
+
+
+        # =========================
+        # Rolling Multi-Step Forecast (Step 9)
+        # =========================
+        st.subheader("Rolling Multi-Step Forecast ke Masa Depan")
+        st.write("Prediksi karakteristik gempa bumi untuk beberapa langkah ke depan berdasarkan data historis terakhir.")
+
+        n_steps_forecast = st.slider("Jumlah Langkah Prediksi ke Depan:", 10, 300, 100, key="forecast_steps")
+
+        if st.button("Lakukan Prediksi Rolling Forecast", key="forecast_button"):
+            # Check if data is long enough for a window
+            if data is not None and len(data) >= WIN:
+                st.info(f"Melakukan prediksi {n_steps_forecast} langkah ke depan...")
+                last_window = data[-WIN:]
+                future_pred = roll_forecast(maml, last_window, scaler, steps=n_steps_forecast, win=WIN)
+                st.success("Prediksi Rolling Forecast Selesai.")
+
+                fig_forecast, axes_forecast = plt.subplots(2, 2, figsize=(12, 8))
+                axes_forecast = axes_forecast.flatten()
+                labels = ["Magnitude", "Latitude", "Longitude", "Depth (km)"]
+
+                for i, name in enumerate(labels):
+                    axes_forecast[i].plot(future_pred[:, i], marker='x', label="Prediksi")
+                    axes_forecast[i].set_title(f"Forecast ke Depan: {name}")
+                    axes_forecast[i].set_xlabel("Step ke depan")
+                    axes_forecast[i].set_ylabel(name)
+                    axes_forecast[i].grid(True, linestyle="--", alpha=0.6)
+                    axes_forecast[i].legend()
+
+                plt.suptitle(f"Rolling Forecast {n_steps_forecast} Langkah ke Depan", fontsize=16)
+                plt.tight_layout(rect=[0, 0, 1, 0.96])
+                st.pyplot(fig_forecast)
+                plt.close(fig_forecast)
+
+                fig_mag_forecast, ax_mag_forecast = plt.subplots(figsize=(10,4))
+                ax_mag_forecast.plot(future_pred[:, 0], marker='o', markersize=4, label="Prediksi Magnitude")
+                ax_mag_forecast.set_title("Forecast Magnitude ke Depan")
+                ax_mag_forecast.set_xlabel("Step ke depan")
+                ax_mag_forecast.set_ylabel("Magnitude (skala asli)")
+                ax_mag_forecast.grid(True, linestyle="--", alpha=0.6)
+                ax_mag_forecast.legend()
+                st.pyplot(fig_mag_forecast)
+                plt.close(fig_mag_forecast)
+            else:
+                st.warning("Tidak cukup data untuk melakukan rolling forecast. Harap unggah file CSV dengan data yang memadai.")
+
+
+        # =========================
+        # Interactive Single Point Prediction (Step 9)
+        # =========================
+        st.subheader("Prediksi Magnitude pada Lokasi Tertentu")
+        st.write("Masukkan koordinat dan kedalaman untuk memprediksi Magnitude di lokasi tersebut.")
+
+        lat_input = st.number_input("Latitude:", value=-2.5, format="%.4f", step=0.1, key="single_lat")
+        lon_input = st.number_input("Longitude:", value=118.0, format="%.4f", step=0.1, key="single_lon")
+        depth_input = st.number_input("Kedalaman (km):", value=50.0, format="%.1f", step=1.0, key="single_depth")
+
+        if st.button("Prediksi Magnitude", key="single_predict_button"):
+             # Check if data is long enough for a window before predicting
+             if data is not None and len(data) >= WIN:
+                st.info(f"Memprediksi Magnitude untuk lokasi ({lat_input:.2f}, {lon_input:.2f}), depth {depth_input:.1f} km...")
+                mag_pred = predict_magnitude(maml, data, scaler, lat_input, lon_input, depth_input, win=WIN)
+
+                if mag_pred is not None:
+                    st.write(f"**Prediksi Magnitude:** {mag_pred:.2f}")
+                    location_name = get_location_name(lat_input, lon_input)
+                    st.write(f"**Perkiraan Lokasi:** {location_name}")
+                st.success("Prediksi Magnitude Selesai.")
+             else:
+                 st.warning("Tidak cukup data untuk melakukan prediksi. Harap unggah file CSV dengan data yang memadai.")
+
+
+        # =========================
+        # Forecast Future Earthquakes and Plot on Map (Step 9)
+        # =========================
+        st.subheader("Prediksi Gempa Bumi Masa Depan dan Plot di Peta")
+        st.write("Memprediksi lokasi dan karakteristik gempa bumi di masa depan dan menampilkannya di peta.")
+
+        n_steps_map = st.slider("Jumlah Gempa yang Diprediksi untuk Peta:", 1, 50, 10, key="map_steps")
+
+        if st.button("Prediksi dan Plot di Peta", key="map_button"):
+             # Check if data is long enough for a window before predicting
+             if data is not None and len(data) >= WIN:
+                st.info(f"Memprediksi {n_steps_map} gempa ke depan dan memplot di peta...")
+                last_window = data[-WIN:]
+                df_future = predict_future_eq(maml, last_window, scaler, n_steps=n_steps_map, win=WIN)
+                st.success("Prediksi dan Plot di Peta Selesai.")
+
+                st.write(f"\nPrediksi {n_steps_map} gempa ke depan:")
+                st.dataframe(df_future)
+
+                fmap, legend_html = plot_on_map(df_future, map_center=[-2.5, 118], zoom_start=5)
+
+                st_map = folium.Map(location=[-2.5, 118], zoom_start=5)
+                for name, layer in fmap._children.items():
+                     st_map.add_child(layer, name=name)
+
+                st.markdown(legend_html, unsafe_allow_html=True)
+                st_folium(st_map, width=700, height=500)
+             else:
+                 st.warning("Tidak cukup data untuk memprediksi dan memplot di peta. Harap unggah file CSV dengan data yang memadai.")
+
+
+else:
+    st.info("Unggah file CSV data gempa bumi untuk memulai.")
