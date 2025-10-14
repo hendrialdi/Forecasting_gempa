@@ -4,3 +4,6 @@ streamlit-folium
 pandas
 numpy
 torch
+learn2learn                                               
+sklearn
+matplotlib
