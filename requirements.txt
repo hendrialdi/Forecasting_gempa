@@ -4,6 +4,7 @@ streamlit-folium
 pandas
 numpy
 torch
-learn2learn                                               
+PyTorch                                              
 sklearn
 matplotlib
+TensorFlow
