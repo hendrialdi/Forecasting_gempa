@@ -1,9 +1,14 @@
 streamlit==1.39.0
 pandas==2.2.2
 numpy==1.26.4
-torch==2.2.2
 scikit-learn==1.5.2
 matplotlib==3.9.2
-tensorflow==2.15.0
 folium==0.17.0
 streamlit-folium==0.22.0
+
+# Gunakan versi CPU untuk PyTorch dan TensorFlow
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
+torchaudio==2.2.2+cpu
+tensorflow-cpu==2.15.0
+
