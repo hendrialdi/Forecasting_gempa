@@ -6,11 +6,11 @@ from streamlit_folium import st_folium
 import random
 
 # Judul aplikasi
-st.title("🌋 Visualisasi Prediksi Gempa Indonesia (Simulasi)")
+st.title("🌋 Visualisasi Prediksi Gempa Indonesia ")
 
 st.markdown("""
-Aplikasi ini menampilkan **simulasi prediksi gempa** di wilayah Indonesia berdasarkan input pengguna.
-Data masih **acak (random)** untuk visualisasi awal.
+Aplikasi ini menampilkan simulasi prediksi gempa di wilayah Indonesia berdasarkan input pengguna.
+
 """)
 
 # ============================
@@ -90,4 +90,4 @@ if st.button("Prediksi Magnitudo"):
 
 # Footer
 st.markdown("---")
-st.caption("Prototype by Rivaldi — Data simulasi untuk uji visualisasi Streamlit.")
+
