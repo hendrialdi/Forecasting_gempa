@@ -1,20 +1,19 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import folium
-from streamlit_folium import st_folium
+import pydeck as pdk
 import random
 
 # Judul aplikasi
 st.title("🌋 Visualisasi Prediksi Gempa Indonesia ")
 
 st.markdown("""
-Aplikasi ini menampilkan simulasi prediksi gempa di wilayah Indonesia berdasarkan input pengguna.
-
+Aplikasi ini menampilkan simulasi prediksi gempa di wilayah Indonesia
+dengan visualisasi peta interaktif.
 """)
 
 # ============================
-# Bagian 1: Prediksi Gempa Selanjutnya (Map)
+# Bagian 1: Prediksi Gempa Selanjutnya
 # ============================
 st.header("🔮 Prediksi Gempa Selanjutnya")
 
@@ -23,8 +22,8 @@ jumlah_prediksi = st.number_input(
     min_value=1, max_value=10, value=3
 )
 
-if st.button("Tampilkan Prediksi Gempa di Peta"):
-    # Data acak untuk simulasi
+if st.button("Tampilkan Prediksi Gempa"):
+    # Simulasi data gempa
     lokasi = ["Sumatera", "Jawa", "Bali", "NTT", "NTB", "Sulawesi", "Papua", "Maluku", "Kalimantan"]
     df_prediksi = pd.DataFrame({
         "Wilayah": [random.choice(lokasi) for _ in range(jumlah_prediksi)],
@@ -34,30 +33,34 @@ if st.button("Tampilkan Prediksi Gempa di Peta"):
         "Magnitudo (Mw)": np.random.uniform(3.0, 7.0, jumlah_prediksi).round(2)
     })
 
-    # Tampilkan tabel
     st.dataframe(df_prediksi)
 
-    # Buat peta Indonesia
-    map_pred = folium.Map(location=[-2, 118], zoom_start=5)
+    # Layer visualisasi PyDeck
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        data=df_prediksi,
+        get_position='[Longitude, Latitude]',
+        get_radius='Magnitudo (Mw) * 10000',
+        get_color='[255, 100, 50, 180]',  # warna oranye semi transparan
+        pickable=True
+    )
 
-    # Tambahkan titik ke peta
-    for _, row in df_prediksi.iterrows():
-        color = "red" if row["Magnitudo (Mw)"] >= 6 else "orange" if row["Magnitudo (Mw)"] >= 4.5 else "blue"
-        folium.CircleMarker(
-            location=[row["Latitude"], row["Longitude"]],
-            radius=row["Magnitudo (Mw)"],  # ukuran berdasarkan magnitudo
-            color=color,
-            fill=True,
-            fill_opacity=0.7,
-            popup=(
-                f"<b>Wilayah:</b> {row['Wilayah']}<br>"
-                f"<b>Magnitudo:</b> {row['Magnitudo (Mw)']} Mw<br>"
-                f"<b>Kedalaman:</b> {row['Kedalaman (km)']} km"
-            )
-        ).add_to(map_pred)
+    # View State (fokus Indonesia)
+    view_state = pdk.ViewState(
+        latitude=-2,
+        longitude=118,
+        zoom=4.5,
+        pitch=0
+    )
 
     # Tampilkan peta
-    st_data = st_folium(map_pred, width=700, height=450)
+    st.pydeck_chart(pdk.Deck(
+        layers=[layer],
+        initial_view_state=view_state,
+        tooltip={
+            "text": "📍 {Wilayah}\nMagnitudo: {Magnitudo (Mw)} Mw\nKedalaman: {Kedalaman (km)} km"
+        }
+    ))
 
 # ============================
 # Bagian 2: Prediksi Magnitudo Berdasarkan Input
@@ -69,24 +72,43 @@ lon = st.number_input("Masukkan Longitude (95 s.d 141):", min_value=95.0, max_va
 depth = st.number_input("Masukkan Kedalaman (km):", min_value=0.0, max_value=700.0, value=50.0)
 
 if st.button("Prediksi Magnitudo"):
-    # Simulasi model: magnitude naik dengan depth dan random noise
+    # Simulasi prediksi magnitudo
     magnitude_pred = round(3 + np.random.rand() * (7 - 3) - (depth / 1000), 2)
     magnitude_pred = max(magnitude_pred, 2.5)
 
     st.success(f"🔎 Prediksi Magnitudo: **{magnitude_pred} Mw**")
 
-    # Peta tunggal lokasi input
-    map_input = folium.Map(location=[lat, lon], zoom_start=6)
-    folium.CircleMarker(
-        location=[lat, lon],
-        radius=magnitude_pred,
-        color="red",
-        fill=True,
-        fill_opacity=0.7,
-        popup=f"<b>Prediksi Magnitudo:</b> {magnitude_pred} Mw<br><b>Kedalaman:</b> {depth} km"
-    ).add_to(map_input)
+    df_input = pd.DataFrame({
+        "Latitude": [lat],
+        "Longitude": [lon],
+        "Magnitudo (Mw)": [magnitude_pred],
+        "Kedalaman (km)": [depth]
+    })
 
-    st_folium(map_input, width=700, height=450)
+    # Layer marker tunggal
+    layer_input = pdk.Layer(
+        "ScatterplotLayer",
+        data=df_input,
+        get_position='[Longitude, Latitude]',
+        get_radius='Magnitudo (Mw) * 15000',
+        get_color='[255, 0, 0, 200]',
+        pickable=True
+    )
+
+    view_state_input = pdk.ViewState(
+        latitude=lat,
+        longitude=lon,
+        zoom=5,
+        pitch=0
+    )
+
+    st.pydeck_chart(pdk.Deck(
+        layers=[layer_input],
+        initial_view_state=view_state_input,
+        tooltip={
+            "text": "Koordinat: [{Latitude}, {Longitude}]\nMagnitudo: {Magnitudo (Mw)} Mw\nKedalaman: {Kedalaman (km)} km"
+        }
+    ))
 
 # Footer
 st.markdown("---")
