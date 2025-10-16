@@ -1,5 +1,5 @@
 streamlit==1.39.0
 pandas==2.2.2
 numpy==1.26.4
-folium==0.17.0
-streamlit-folium==0.22.0
+pydeck==0.9.1
+
